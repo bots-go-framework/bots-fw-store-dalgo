@@ -6,6 +6,9 @@ package botsfwstoredalgo
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -17,10 +20,11 @@ import (
 )
 
 const (
-	botPlatformsCollection = "botPlatforms"
-	botsCollection         = "bots"
-	botUsersCollection     = "botUsers"
-	botChatsCollection     = "botChats"
+	botPlatformsCollection   = "botPlatforms"
+	botsCollection           = "bots"
+	botUsersCollection       = "botUsers"
+	botChatsCollection       = "botChats"
+	webhookUpdatesCollection = "webhookUpdates"
 )
 
 // DBProvider returns the DALgo database for a request context. It supports
@@ -48,6 +52,16 @@ type AppUserStore interface {
 	PrepareAppUser(ctx context.Context, identity botsfwstore.Identity) (botsfwstore.AppUser, error)
 	EnsureAppUser(ctx context.Context, tx dal.ReadwriteTransaction, identity botsfwstore.Identity, prepared botsfwstore.AppUser) (botsfwstore.AppUser, error)
 	AppUser(ctx context.Context, tx dal.ReadSession, botID, appUserID string) (botsfwstore.AppUser, error)
+}
+
+type webhookUpdateData struct {
+	Status      string    `firestore:"status"`
+	LeaseID     string    `firestore:"leaseID,omitempty"`
+	LeaseUntil  time.Time `firestore:"leaseUntil,omitempty"`
+	Attempts    int       `firestore:"attempts"`
+	Completed   time.Time `firestore:"completed,omitempty"`
+	Failed      time.Time `firestore:"failed,omitempty"`
+	FailureCode string    `firestore:"failureCode,omitempty"`
 }
 
 // StateStore is the default DALgo-backed implementation of the framework store.
@@ -133,6 +147,105 @@ func NewBotChatKey[PlatformID ~string](platformID PlatformID, botID, chatID stri
 		panic("chat ID is required")
 	}
 	return dalrecord.NewKeyWithParentAndID(NewBotKey(platformID, botID), botChatsCollection, chatID)
+}
+
+// NewWebhookUpdateKey stores the inbox under its bot to isolate equal provider
+// update IDs from different Telegram bots.
+func NewWebhookUpdateKey(key botsfwstore.WebhookUpdateKey) *dalrecord.Key {
+	if err := key.Validate(); err != nil {
+		panic(err)
+	}
+	// Provider update IDs are untrusted external input. A document key must not
+	// retain a payload-derived value or depend on provider path/length rules.
+	// SHA-256 makes a bounded opaque, deterministic key while preserving exact
+	// deduplication semantics.
+	digest := sha256.Sum256([]byte(key.UpdateID))
+	return dalrecord.NewKeyWithParentAndID(NewBotKey(key.PlatformID, key.BotID), webhookUpdatesCollection, hex.EncodeToString(digest[:]))
+}
+
+func newLeaseID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func (s *StateStore) ClaimWebhookUpdate(ctx context.Context, key botsfwstore.WebhookUpdateKey, leaseUntil time.Time) (claim botsfwstore.WebhookUpdateClaim, err error) {
+	if err = key.Validate(); err != nil {
+		return claim, err
+	}
+	if leaseUntil.IsZero() || !leaseUntil.After(s.now()) {
+		return claim, errors.New("webhook update lease must end in the future")
+	}
+	db, err := s.db(ctx)
+	if err != nil {
+		return claim, err
+	}
+	err = db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+		data := &webhookUpdateData{}
+		_, getErr := dal.GetRecordWithIDIntoData(ctx, tx, NewWebhookUpdateKey(key), key.UpdateID, data)
+		if getErr != nil && !dalrecord.IsNotFound(getErr) {
+			return getErr
+		}
+		if getErr == nil && data.Status == string(botsfwstore.WebhookUpdateClaimCompleted) {
+			claim = botsfwstore.WebhookUpdateClaim{Status: botsfwstore.WebhookUpdateClaimCompleted, Attempts: data.Attempts}
+			return nil
+		}
+		now := s.now()
+		if getErr == nil && data.Status == "processing" && data.LeaseUntil.After(now) {
+			claim = botsfwstore.WebhookUpdateClaim{Status: botsfwstore.WebhookUpdateClaimLeased, Attempts: data.Attempts}
+			return nil
+		}
+		leaseID, e := newLeaseID()
+		if e != nil {
+			return e
+		}
+		data.Status, data.LeaseID, data.LeaseUntil, data.Attempts, data.FailureCode = "processing", leaseID, leaseUntil, data.Attempts+1, ""
+		if e = tx.Set(ctx, dalrecord.NewRecordWithData(NewWebhookUpdateKey(key), data)); e != nil {
+			return e
+		}
+		claim = botsfwstore.WebhookUpdateClaim{Status: botsfwstore.WebhookUpdateClaimAcquired, LeaseID: leaseID, Attempts: data.Attempts}
+		return nil
+	})
+	return claim, err
+}
+
+func (s *StateStore) CompleteWebhookUpdate(ctx context.Context, key botsfwstore.WebhookUpdateKey, leaseID string) error {
+	return s.finishWebhookUpdate(ctx, key, leaseID, true, botsfwstore.WebhookUpdateFailureUnknown)
+}
+func (s *StateStore) FailWebhookUpdate(ctx context.Context, key botsfwstore.WebhookUpdateKey, leaseID string, failureCode botsfwstore.WebhookUpdateFailureCode) error {
+	return s.finishWebhookUpdate(ctx, key, leaseID, false, failureCode)
+}
+func (s *StateStore) finishWebhookUpdate(ctx context.Context, key botsfwstore.WebhookUpdateKey, leaseID string, completed bool, failureCode botsfwstore.WebhookUpdateFailureCode) error {
+	if err := key.Validate(); err != nil {
+		return err
+	}
+	if leaseID == "" {
+		return errors.New("webhook update lease ID is required")
+	}
+	db, err := s.db(ctx)
+	if err != nil {
+		return err
+	}
+	return db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+		data := &webhookUpdateData{}
+		k := NewWebhookUpdateKey(key)
+		if _, e := dal.GetRecordWithIDIntoData(ctx, tx, k, key.UpdateID, data); e != nil {
+			return e
+		}
+		if data.LeaseID != leaseID {
+			return errors.New("webhook update lease is no longer owned")
+		}
+		data.LeaseID, data.LeaseUntil = "", time.Time{}
+		if completed {
+			data.Status, data.Completed, data.FailureCode = string(botsfwstore.WebhookUpdateClaimCompleted), s.now(), ""
+		} else {
+			data.Status, data.Failed = "failed", s.now()
+			data.FailureCode = string(botsfwstore.NormalizeWebhookUpdateFailureCode(failureCode))
+		}
+		return tx.Set(ctx, dalrecord.NewRecordWithData(k, data))
+	})
 }
 
 // GetPlatformUser loads a platform user from the historical schema.
