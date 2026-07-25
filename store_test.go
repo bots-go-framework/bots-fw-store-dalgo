@@ -9,6 +9,7 @@ import (
 	"github.com/bots-go-framework/bots-fw-store/botsfwstore"
 	"github.com/dal-go/dalgo/adapters/dalgo2memory"
 	"github.com/dal-go/dalgo/dal"
+	"github.com/dal-go/record"
 )
 
 type testAppUsers struct {
@@ -31,8 +32,8 @@ func (transactionalAppUsers) PrepareAppUser(context.Context, botsfwstore.Identit
 
 func (s *transactionalAppUsers) EnsureAppUser(ctx context.Context, tx dal.ReadwriteTransaction, _ botsfwstore.Identity, prepared botsfwstore.AppUser) (botsfwstore.AppUser, error) {
 	s.tx = tx
-	key := dal.NewKeyWithID("appUsers", prepared.ID)
-	if err := tx.Set(ctx, dal.NewRecordWithData(key, &persistedAppUser{Name: "prepared"})); err != nil {
+	key := record.NewKeyWithID("appUsers", prepared.ID)
+	if err := tx.Set(ctx, record.NewRecordWithData(key, &persistedAppUser{Name: "prepared"})); err != nil {
 		return botsfwstore.AppUser{}, err
 	}
 	return prepared, nil
