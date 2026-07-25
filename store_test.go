@@ -3,6 +3,7 @@ package botsfwstoredalgo
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -101,6 +102,27 @@ func TestWebhookUpdateInbox_ConcurrentClaimHasOneOwner(t *testing.T) {
 	}
 	if acquired != 1 || leased != callers-1 {
 		t.Fatalf("acquired=%d, leased=%d; want 1 and %d", acquired, leased, callers-1)
+	}
+}
+
+func TestWebhookUpdateInbox_UntrustedUpdateIDsAreOpaqueAndStable(t *testing.T) {
+	keys := []botsfwstore.WebhookUpdateKey{
+		{PlatformID: "telegram", BotID: "bot", UpdateID: "/provider/path/with/slashes"},
+		{PlatformID: "telegram", BotID: "bot", UpdateID: "🧾-更新"},
+		{PlatformID: "telegram", BotID: "bot", UpdateID: string(make([]byte, 20_000))},
+	}
+	for _, input := range keys {
+		t.Run("opaque", func(t *testing.T) {
+			key1 := NewWebhookUpdateKey(input)
+			key2 := NewWebhookUpdateKey(input)
+			key1ID, key2ID := fmt.Sprint(key1.ID), fmt.Sprint(key2.ID)
+			if key1ID != key2ID || len(key1ID) != 64 {
+				t.Fatalf("hashed document IDs = %q and %q", key1.ID, key2.ID)
+			}
+			if key1ID == input.UpdateID {
+				t.Fatal("raw provider update ID was used as a document key")
+			}
+		})
 	}
 }
 

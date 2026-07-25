@@ -7,6 +7,7 @@ package botsfwstoredalgo
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -154,7 +155,12 @@ func NewWebhookUpdateKey(key botsfwstore.WebhookUpdateKey) *dalrecord.Key {
 	if err := key.Validate(); err != nil {
 		panic(err)
 	}
-	return dalrecord.NewKeyWithParentAndID(NewBotKey(key.PlatformID, key.BotID), webhookUpdatesCollection, key.UpdateID)
+	// Provider update IDs are untrusted external input. A document key must not
+	// retain a payload-derived value or depend on provider path/length rules.
+	// SHA-256 makes a bounded opaque, deterministic key while preserving exact
+	// deduplication semantics.
+	digest := sha256.Sum256([]byte(key.UpdateID))
+	return dalrecord.NewKeyWithParentAndID(NewBotKey(key.PlatformID, key.BotID), webhookUpdatesCollection, hex.EncodeToString(digest[:]))
 }
 
 func newLeaseID() (string, error) {
