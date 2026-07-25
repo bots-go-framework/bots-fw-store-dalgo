@@ -54,28 +54,53 @@ type AppUserStore interface {
 type StateStore struct {
 	getDB    DBProvider
 	appUsers AppUserStore
+	now      func() time.Time
 }
 
 var _ botsfwstore.StateStore = (*StateStore)(nil)
 
+// StateStoreOption configures optional StateStore behaviour.
+type StateStoreOption func(*StateStore)
+
+// WithClock overrides the clock StateStore uses to stamp DtCreated/DtUpdated
+// on platform-user and bot-chat records (via botsfwmodels.BotBaseData.
+// EnsureTimestamps). It defaults to time.Now().UTC(). Tests should supply a
+// fixed or stepped clock instead of relying on wall-clock time, so assertions
+// about DtCreated/DtUpdated are deterministic.
+func WithClock(now func() time.Time) StateStoreOption {
+	return func(s *StateStore) {
+		if now != nil {
+			s.now = now
+		}
+	}
+}
+
 // NewStateStore creates a DALgo state-store adapter.
-func NewStateStore(db dal.DB, appUsers AppUserStore) *StateStore {
+func NewStateStore(db dal.DB, appUsers AppUserStore, opts ...StateStoreOption) *StateStore {
 	if db == nil {
 		panic("db is required")
 	}
-	return NewStateStoreWithProvider(func(context.Context) (dal.DB, error) { return db, nil }, appUsers)
+	return NewStateStoreWithProvider(func(context.Context) (dal.DB, error) { return db, nil }, appUsers, opts...)
 }
 
 // NewStateStoreWithProvider creates a DALgo state-store adapter whose database
 // is resolved for each operation.
-func NewStateStoreWithProvider(getDB DBProvider, appUsers AppUserStore) *StateStore {
+func NewStateStoreWithProvider(getDB DBProvider, appUsers AppUserStore, opts ...StateStoreOption) *StateStore {
 	if getDB == nil {
 		panic("getDB is required")
 	}
 	if appUsers == nil {
 		panic("appUsers is required")
 	}
-	return &StateStore{getDB: getDB, appUsers: appUsers}
+	s := &StateStore{
+		getDB:    getDB,
+		appUsers: appUsers,
+		now:      func() time.Time { return time.Now().UTC() },
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // NewPlatformKey creates the historical top-level platform key.
@@ -223,13 +248,21 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 			if platformData == nil {
 				return errors.New("platform-user factory returned nil")
 			}
+			// The factory only populates platform-specific fields (see
+			// bots-fw-telegram's SetBotUserFields); without this, DtCreated/
+			// DtUpdated stay zero and Validate rejects the very first write
+			// for a brand-new platform user.
+			platformData.BaseData().EnsureTimestamps(s.now())
 			if _, getErr = dal.InsertRecordWithDataAndID(ctx, tx, platformUserKey, identity.BotUserID, platformData); getErr != nil {
 				return getErr
 			}
 		} else {
 			if platformAppUserID == "" {
 				platformData.SetAppUserID(linked.AppUser.ID)
-				platformData.SetUpdatedTime(identityTime(ctx))
+				// EnsureTimestamps (not SetUpdatedTime) so a legacy record
+				// that somehow lacks DtCreated self-heals instead of staying
+				// permanently invalid.
+				platformData.BaseData().EnsureTimestamps(s.now())
 				if getErr = tx.Set(ctx, dalrecord.NewRecordWithData(platformUserKey, platformData)); getErr != nil {
 					return getErr
 				}
@@ -250,6 +283,10 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 		chatKey := NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID)
 		_, getErr = dal.GetRecordWithIDIntoData(ctx, tx, chatKey, identity.ChatID, chatData)
 		if dalrecord.IsNotFound(getErr) {
+			// Same reasoning as the new-platform-user branch above: the
+			// factory (SetBotChatFields) only sets ids and access, never
+			// timestamps.
+			chatData.Base().EnsureTimestamps(s.now())
 			if _, getErr = dal.InsertRecordWithDataAndID(ctx, tx, chatKey, identity.ChatID, chatData); getErr != nil {
 				return getErr
 			}
@@ -257,6 +294,7 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 			return getErr
 		} else if chatData.GetAppUserID() == "" {
 			chatData.SetAppUserID(linked.AppUser.ID)
+			chatData.Base().EnsureTimestamps(s.now())
 			if getErr = tx.Set(ctx, dalrecord.NewRecordWithData(chatKey, chatData)); getErr != nil {
 				return getErr
 			}
@@ -293,10 +331,6 @@ func readPlatformUser(
 	})
 	return data, found, err
 }
-
-// identityTime exists to make the write timestamp explicit at the adapter
-// boundary. DALgo transaction retries never encompass router work.
-func identityTime(context.Context) time.Time { return time.Now().UTC() }
 
 func (s *StateStore) PlatformUser(ctx context.Context, identity botsfwstore.Identity, newData func() botsfwmodels.PlatformUserData) (result botsfwstore.PlatformUser, err error) {
 	if err = identity.Validate(); err != nil {
@@ -377,7 +411,7 @@ func (s *StateStore) SetPlatformUserAccessGranted(ctx context.Context, identity 
 			return notFound(err)
 		}
 		data.SetAccessGranted(value)
-		data.SetUpdatedTime(identityTime(ctx))
+		data.BaseData().EnsureTimestamps(s.now())
 		if err := tx.Set(ctx, dalrecord.NewRecordWithData(key, data)); err != nil {
 			return err
 		}
