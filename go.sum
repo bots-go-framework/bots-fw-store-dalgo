@@ -2,8 +2,8 @@ github.com/RoaringBitmap/roaring/v2 v2.21.0 h1:RKVgkD+c9ouyCydF2PW/mztDyZTsb7ksa
 github.com/RoaringBitmap/roaring/v2 v2.21.0/go.mod h1:SfT3of9nYh3vis1dIbCj4Yw6KQGujTN+f345nrN/0JA=
 github.com/bits-and-blooms/bitset v1.24.4 h1:95H15Og1clikBrKr/DuzMXkQzECs1M6hhoGXLwLQOZE=
 github.com/bits-and-blooms/bitset v1.24.4/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
-github.com/bots-go-framework/bots-fw-store v0.13.0 h1:RK6bu8snyR9pjzqC/U9GNICaARtB12C86dRZTUNbGMw=
-github.com/bots-go-framework/bots-fw-store v0.13.0/go.mod h1:0yS6Pg516jHIrIInv+kvWRWxXNGGqR4tlvRua8GfT20=
+github.com/bots-go-framework/bots-fw-store v0.14.0 h1:SRiK8cpe/BYAxk3XMGOKG/P6INmQR1lAlrIFb//r6lQ=
+github.com/bots-go-framework/bots-fw-store v0.14.0/go.mod h1:0yS6Pg516jHIrIInv+kvWRWxXNGGqR4tlvRua8GfT20=
 github.com/dal-go/dalgo v0.63.1 h1:GEJAGlNH5xGLdFasSIRrYdqGfd0+4A9DGQ843qJQbyA=
 github.com/dal-go/dalgo v0.63.1/go.mod h1:LtD5XVzb1kAdXaRcWVNy4F2ROC4fqR4jqD3q/GD4fJQ=
 github.com/dal-go/record v0.1.0 h1:hA4143oZwIgtBH/1BRTUEZMCpDfXQr3ONlVXX8USCNg=

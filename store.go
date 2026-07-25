@@ -253,6 +253,12 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 			// DtUpdated stay zero and Validate rejects the very first write
 			// for a brand-new platform user.
 			platformData.BaseData().EnsureTimestamps(s.now())
+			// Same reasoning for BotIDs: WithRequiredBotIDs.Validate requires
+			// a non-empty BotIDs, but no platform adapter's field setter
+			// populates it either (SetBotUserFields receives a botID
+			// parameter and never uses it). EnsureBotID is the seam that
+			// finally sets it, using the identity already in scope here.
+			platformData.BaseData().EnsureBotID(identity.BotID)
 			if _, getErr = dal.InsertRecordWithDataAndID(ctx, tx, platformUserKey, identity.BotUserID, platformData); getErr != nil {
 				return getErr
 			}
@@ -263,6 +269,12 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 				// that somehow lacks DtCreated self-heals instead of staying
 				// permanently invalid.
 				platformData.BaseData().EnsureTimestamps(s.now())
+				// Same self-heal reasoning for BotIDs: a platform-user record
+				// that predates this field, or was seeded by an application
+				// flow that never set it, gains the current bot id here
+				// instead of staying permanently invalid. Never clobbers a
+				// different bot's id already recorded.
+				platformData.BaseData().EnsureBotID(identity.BotID)
 				if getErr = tx.Set(ctx, dalrecord.NewRecordWithData(platformUserKey, platformData)); getErr != nil {
 					return getErr
 				}
@@ -386,6 +398,14 @@ func (s *StateStore) SaveChat(ctx context.Context, identity botsfwstore.Identity
 		return err
 	}
 	return db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+		// Every other write site in this file (new/relinked platform user,
+		// new/relinked chat inside EnsureLinked, SetPlatformUserAccessGranted)
+		// stamps timestamps before persisting; this one did not, so a caller
+		// that passes a BotChatData whose DtCreated/DtUpdated are (still, or
+		// again) zero - a legacy record, or simply one it built itself - would
+		// write a record BotChatData.Validate would reject, with no self-heal
+		// seam to fix it. EnsureTimestamps closes that gap the same way.
+		data.Base().EnsureTimestamps(s.now())
 		return tx.Set(ctx, dalrecord.NewRecordWithData(NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID), data))
 	})
 }
@@ -412,6 +432,10 @@ func (s *StateStore) SetPlatformUserAccessGranted(ctx context.Context, identity 
 		}
 		data.SetAccessGranted(value)
 		data.BaseData().EnsureTimestamps(s.now())
+		// Same self-heal seam as EnsureLinked: this loads and rewrites an
+		// existing platform-user record too, so a legacy record missing
+		// BotIDs gets the same chance to repair itself here.
+		data.BaseData().EnsureBotID(identity.BotID)
 		if err := tx.Set(ctx, dalrecord.NewRecordWithData(key, data)); err != nil {
 			return err
 		}

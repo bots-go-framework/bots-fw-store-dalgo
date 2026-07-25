@@ -3,7 +3,7 @@ module github.com/bots-go-framework/bots-fw-store-dalgo
 go 1.25
 
 require (
-	github.com/bots-go-framework/bots-fw-store v0.13.0
+	github.com/bots-go-framework/bots-fw-store v0.14.0
 	github.com/dal-go/dalgo v0.63.1
 )
 
