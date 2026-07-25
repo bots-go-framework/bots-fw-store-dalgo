@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/bots-go-framework/bots-fw-store/botsfwmodels"
 	"github.com/bots-go-framework/bots-fw-store/botsfwstore"
@@ -11,6 +12,35 @@ import (
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/record"
 )
+
+func TestWebhookUpdateInbox_ClaimCompleteAndLeaseExpiry(t *testing.T) {
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	store := NewStateStore(dalgo2memory.NewDB(), &testAppUsers{}, WithClock(func() time.Time { return now }))
+	key := botsfwstore.WebhookUpdateKey{PlatformID: "telegram", BotID: "bot", UpdateID: "42"}
+	claim, err := store.ClaimWebhookUpdate(context.Background(), key, now.Add(time.Minute))
+	if err != nil || !claim.CanDispatch() || claim.Attempts != 1 {
+		t.Fatalf("first claim = %#v, %v", claim, err)
+	}
+	leased, err := store.ClaimWebhookUpdate(context.Background(), key, now.Add(time.Minute))
+	if err != nil || leased.Status != botsfwstore.WebhookUpdateClaimLeased {
+		t.Fatalf("concurrent claim = %#v, %v", leased, err)
+	}
+	now = now.Add(2 * time.Minute)
+	retry, err := store.ClaimWebhookUpdate(context.Background(), key, now.Add(time.Minute))
+	if err != nil || !retry.CanDispatch() || retry.Attempts != 2 || retry.LeaseID == claim.LeaseID {
+		t.Fatalf("expired-lease claim = %#v, %v", retry, err)
+	}
+	if err = store.CompleteWebhookUpdate(context.Background(), key, retry.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	done, err := store.ClaimWebhookUpdate(context.Background(), key, now.Add(time.Minute))
+	if err != nil || done.Status != botsfwstore.WebhookUpdateClaimCompleted {
+		t.Fatalf("completed claim = %#v, %v", done, err)
+	}
+	if err = store.CompleteWebhookUpdate(context.Background(), key, claim.LeaseID); err == nil {
+		t.Fatal("stale lease completed update")
+	}
+}
 
 type testAppUsers struct {
 	prepareCalls int
