@@ -3,6 +3,7 @@ package botsfwstoredalgo
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,7 +16,8 @@ import (
 
 func TestWebhookUpdateInbox_ClaimCompleteAndLeaseExpiry(t *testing.T) {
 	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
-	store := NewStateStore(dalgo2memory.NewDB(), &testAppUsers{}, WithClock(func() time.Time { return now }))
+	db := dalgo2memory.NewDB()
+	store := NewStateStore(db, &testAppUsers{}, WithClock(func() time.Time { return now }))
 	key := botsfwstore.WebhookUpdateKey{PlatformID: "telegram", BotID: "bot", UpdateID: "42"}
 	claim, err := store.ClaimWebhookUpdate(context.Background(), key, now.Add(time.Minute))
 	if err != nil || !claim.CanDispatch() || claim.Attempts != 1 {
@@ -45,12 +47,60 @@ func TestWebhookUpdateInbox_ClaimCompleteAndLeaseExpiry(t *testing.T) {
 	if err != nil || !failed.CanDispatch() {
 		t.Fatalf("failed-key claim = %#v, %v", failed, err)
 	}
-	if err = store.FailWebhookUpdate(context.Background(), failedKey, failed.LeaseID, errors.New("temporary failure")); err != nil {
+	if err = store.FailWebhookUpdate(context.Background(), failedKey, failed.LeaseID, botsfwstore.WebhookUpdateFailureCode("provider payload: token=secret")); err != nil {
 		t.Fatal(err)
+	}
+	failedData := &webhookUpdateData{}
+	if _, err = dal.GetRecordWithIDIntoData(context.Background(), db, NewWebhookUpdateKey(failedKey), failedKey.UpdateID, failedData); err != nil {
+		t.Fatal(err)
+	}
+	if failedData.FailureCode != string(botsfwstore.WebhookUpdateFailureUnknown) {
+		t.Fatalf("unsafe failure code was persisted as %q", failedData.FailureCode)
 	}
 	retried, err := store.ClaimWebhookUpdate(context.Background(), failedKey, now.Add(time.Minute))
 	if err != nil || !retried.CanDispatch() || retried.Attempts != 2 {
 		t.Fatalf("failed-key retry = %#v, %v", retried, err)
+	}
+}
+
+func TestWebhookUpdateInbox_ConcurrentClaimHasOneOwner(t *testing.T) {
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	store := NewStateStore(dalgo2memory.NewDB(), &testAppUsers{}, WithClock(func() time.Time { return now }))
+	key := botsfwstore.WebhookUpdateKey{PlatformID: "telegram", BotID: "bot", UpdateID: "concurrent"}
+	const callers = 12
+	claims := make(chan botsfwstore.WebhookUpdateClaim, callers)
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			claim, err := store.ClaimWebhookUpdate(context.Background(), key, now.Add(time.Minute))
+			claims <- claim
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(claims)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	acquired, leased := 0, 0
+	for claim := range claims {
+		switch claim.Status {
+		case botsfwstore.WebhookUpdateClaimAcquired:
+			acquired++
+		case botsfwstore.WebhookUpdateClaimLeased:
+			leased++
+		default:
+			t.Fatalf("unexpected concurrent claim %#v", claim)
+		}
+	}
+	if acquired != 1 || leased != callers-1 {
+		t.Fatalf("acquired=%d, leased=%d; want 1 and %d", acquired, leased, callers-1)
 	}
 }
 

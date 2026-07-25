@@ -54,13 +54,13 @@ type AppUserStore interface {
 }
 
 type webhookUpdateData struct {
-	Status     string    `firestore:"status"`
-	LeaseID    string    `firestore:"leaseID,omitempty"`
-	LeaseUntil time.Time `firestore:"leaseUntil,omitempty"`
-	Attempts   int       `firestore:"attempts"`
-	Completed  time.Time `firestore:"completed,omitempty"`
-	Failed     time.Time `firestore:"failed,omitempty"`
-	LastError  string    `firestore:"lastError,omitempty"`
+	Status      string    `firestore:"status"`
+	LeaseID     string    `firestore:"leaseID,omitempty"`
+	LeaseUntil  time.Time `firestore:"leaseUntil,omitempty"`
+	Attempts    int       `firestore:"attempts"`
+	Completed   time.Time `firestore:"completed,omitempty"`
+	Failed      time.Time `firestore:"failed,omitempty"`
+	FailureCode string    `firestore:"failureCode,omitempty"`
 }
 
 // StateStore is the default DALgo-backed implementation of the framework store.
@@ -195,7 +195,7 @@ func (s *StateStore) ClaimWebhookUpdate(ctx context.Context, key botsfwstore.Web
 		if e != nil {
 			return e
 		}
-		data.Status, data.LeaseID, data.LeaseUntil, data.Attempts, data.LastError = "processing", leaseID, leaseUntil, data.Attempts+1, ""
+		data.Status, data.LeaseID, data.LeaseUntil, data.Attempts, data.FailureCode = "processing", leaseID, leaseUntil, data.Attempts+1, ""
 		if e = tx.Set(ctx, dalrecord.NewRecordWithData(NewWebhookUpdateKey(key), data)); e != nil {
 			return e
 		}
@@ -206,12 +206,12 @@ func (s *StateStore) ClaimWebhookUpdate(ctx context.Context, key botsfwstore.Web
 }
 
 func (s *StateStore) CompleteWebhookUpdate(ctx context.Context, key botsfwstore.WebhookUpdateKey, leaseID string) error {
-	return s.finishWebhookUpdate(ctx, key, leaseID, true, nil)
+	return s.finishWebhookUpdate(ctx, key, leaseID, true, botsfwstore.WebhookUpdateFailureUnknown)
 }
-func (s *StateStore) FailWebhookUpdate(ctx context.Context, key botsfwstore.WebhookUpdateKey, leaseID string, cause error) error {
-	return s.finishWebhookUpdate(ctx, key, leaseID, false, cause)
+func (s *StateStore) FailWebhookUpdate(ctx context.Context, key botsfwstore.WebhookUpdateKey, leaseID string, failureCode botsfwstore.WebhookUpdateFailureCode) error {
+	return s.finishWebhookUpdate(ctx, key, leaseID, false, failureCode)
 }
-func (s *StateStore) finishWebhookUpdate(ctx context.Context, key botsfwstore.WebhookUpdateKey, leaseID string, completed bool, cause error) error {
+func (s *StateStore) finishWebhookUpdate(ctx context.Context, key botsfwstore.WebhookUpdateKey, leaseID string, completed bool, failureCode botsfwstore.WebhookUpdateFailureCode) error {
 	if err := key.Validate(); err != nil {
 		return err
 	}
@@ -233,12 +233,10 @@ func (s *StateStore) finishWebhookUpdate(ctx context.Context, key botsfwstore.We
 		}
 		data.LeaseID, data.LeaseUntil = "", time.Time{}
 		if completed {
-			data.Status, data.Completed, data.LastError = string(botsfwstore.WebhookUpdateClaimCompleted), s.now(), ""
+			data.Status, data.Completed, data.FailureCode = string(botsfwstore.WebhookUpdateClaimCompleted), s.now(), ""
 		} else {
 			data.Status, data.Failed = "failed", s.now()
-			if cause != nil {
-				data.LastError = cause.Error()
-			}
+			data.FailureCode = string(botsfwstore.NormalizeWebhookUpdateFailureCode(failureCode))
 		}
 		return tx.Set(ctx, dalrecord.NewRecordWithData(k, data))
 	})
