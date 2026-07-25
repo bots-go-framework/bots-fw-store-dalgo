@@ -40,6 +40,18 @@ func TestWebhookUpdateInbox_ClaimCompleteAndLeaseExpiry(t *testing.T) {
 	if err = store.CompleteWebhookUpdate(context.Background(), key, claim.LeaseID); err == nil {
 		t.Fatal("stale lease completed update")
 	}
+	failedKey := botsfwstore.WebhookUpdateKey{PlatformID: "telegram", BotID: "bot", UpdateID: "43"}
+	failed, err := store.ClaimWebhookUpdate(context.Background(), failedKey, now.Add(time.Minute))
+	if err != nil || !failed.CanDispatch() {
+		t.Fatalf("failed-key claim = %#v, %v", failed, err)
+	}
+	if err = store.FailWebhookUpdate(context.Background(), failedKey, failed.LeaseID, errors.New("temporary failure")); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := store.ClaimWebhookUpdate(context.Background(), failedKey, now.Add(time.Minute))
+	if err != nil || !retried.CanDispatch() || retried.Attempts != 2 {
+		t.Fatalf("failed-key retry = %#v, %v", retried, err)
+	}
 }
 
 type testAppUsers struct {
