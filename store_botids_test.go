@@ -128,6 +128,9 @@ func TestSetPlatformUserAccessGranted_StampsBotID(t *testing.T) {
 	seedPlatformUser := &botsfwmodels.PlatformUserBaseDbo{
 		BotBaseData: botsfwmodels.BotBaseData{DtCreated: seededAt, DtUpdated: seededAt, AppUserID: "app-1"},
 	}
+	// PlatformUserBaseDbo embeds WithRequiredBotIDs, so botIDs is mandatory.
+	// dalgo v0.64 validates on the write path, so the seed must carry it.
+	seedPlatformUser.EnsureBotID(identity.BotID)
 	if err := db.RunReadwriteTransaction(context.Background(), func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		_, err := dal.InsertRecordWithDataAndID(ctx, tx, NewPlatformUserKey(identity.PlatformID, identity.BotUserID), identity.BotUserID, seedPlatformUser)
 		return err
