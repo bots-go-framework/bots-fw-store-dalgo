@@ -199,7 +199,16 @@ func TestEnsureLinked_PreservesHistoricalKeys(t *testing.T) {
 			return &botsfwmodels.PlatformUserBaseDbo{BotBaseData: botsfwmodels.BotBaseData{AppUserID: appUserID}}, nil
 		},
 		NewChatData: func(appUserID string, _ bool) (botsfwmodels.BotChatData, error) {
-			return &botsfwmodels.ChatBaseData{BotBaseData: botsfwmodels.BotBaseData{AppUserID: appUserID}}, nil
+			// The real factory (SetBotChatFields) always calls SetBotUserID, and
+			// ChatBaseData.Validate() requires botUserIDs. Mirror production here:
+			// dalgo v0.64 validates on the write path, so an incomplete chat is
+			// now rejected at insert instead of being silently stored.
+			// SetBotUserID is abstract on ChatBaseData (it panics unless a
+			// platform subclass overrides it), so set the field directly.
+			return &botsfwmodels.ChatBaseData{
+				BotBaseData: botsfwmodels.BotBaseData{AppUserID: appUserID},
+				BotUserIDs:  []string{identity.BotUserID},
+			}, nil
 		},
 	}
 
