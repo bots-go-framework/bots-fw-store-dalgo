@@ -1,10 +1,12 @@
 module github.com/bots-go-framework/bots-fw-store-dalgo
 
-go 1.27.0
+go 1.26.0
+
+toolchain go1.27.0
 
 require (
 	github.com/bots-go-framework/bots-fw-store v0.14.1
-	github.com/dal-go/dalgo v0.74.0
+	github.com/dal-go/dalgo v0.74.1
 	github.com/dal-go/record v0.1.3
 )
 
