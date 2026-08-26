@@ -260,8 +260,20 @@ func TestEnsureLinked_UsesAdapterTransactionForApplicationUser(t *testing.T) {
 		NewPlatformUserData: func(appUserID string) (botsfwmodels.PlatformUserData, error) {
 			return &botsfwmodels.PlatformUserBaseDbo{BotBaseData: botsfwmodels.BotBaseData{AppUserID: appUserID}}, nil
 		},
-		NewChatData: func(string, bool) (botsfwmodels.BotChatData, error) {
-			return nil, errors.New("force rollback after user and platform writes")
+		// Deliberately invalid (no BotUserIDs) rather than a factory error:
+		// dalgo v0.68 forbids reading after a write in the same transaction,
+		// so EnsureLinked now reads the (nonexistent) chat record before any
+		// write is issued, and a factory error here would return before
+		// EnsureAppUser ever ran. Returning an invalid-but-non-nil chat
+		// instead lets the read succeed (not found) and still forces the
+		// desired rollback later, when the chat insert hits
+		// ChatBaseData.Validate's required-BotUserIDs check - after the
+		// app-user and platform-user writes have already happened in this
+		// transaction, which is what this test verifies survives them.
+		NewChatData: func(appUserID string, _ bool) (botsfwmodels.BotChatData, error) {
+			return &botsfwmodels.ChatBaseData{
+				BotBaseData: botsfwmodels.BotBaseData{AppUserID: appUserID},
+			}, nil
 		},
 	}
 

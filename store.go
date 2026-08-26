@@ -311,6 +311,18 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 	}
 
 	err = db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+		// dalgo v0.68 rejects any read that follows a write inside a
+		// read-write transaction (matching real Firestore) and makes the
+		// transaction atomic, so this closure is split into a read phase
+		// that issues every dal/tx read up front, and a write phase below
+		// that only issues dal/tx writes. Values a write phase needs that
+		// would otherwise require a read after another write (the resolved
+		// app-user ID, in particular) are instead derived from data already
+		// available before this transaction started, or resolved here in
+		// the read phase and merely applied afterwards.
+
+		// ---- Read phase ----
+
 		platformData := request.ReadPlatformUserData()
 		if platformData == nil {
 			return errors.New("platform-user reader factory returned nil")
@@ -329,32 +341,45 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 			platformAppUserID = platformData.GetAppUserID()
 		}
 
+		// resolvedAppUser is the app user this identity links to. When the
+		// platform identity is not yet linked, it is `prepared`, minted by
+		// PrepareAppUser before this transaction started - EnsureAppUser
+		// still has to persist it, but that persisting write is deferred to
+		// the write phase below; it does not need to run here to know the
+		// ID. When the platform identity already resolves to an app user,
+		// AppUser is a read (it takes a dal.ReadSession, not a
+		// dal.ReadwriteTransaction) and can safely run in this phase.
+		var resolvedAppUser botsfwstore.AppUser
 		if platformAppUserID == "" {
 			if !preparedAppUser {
 				return errors.New("application user was not prepared for an unlinked platform identity")
 			}
-			linked.AppUser, getErr = s.appUsers.EnsureAppUser(ctx, tx, identity, prepared)
+			resolvedAppUser = prepared
 		} else {
 			if preparedAppUser && platformAppUserID != prepared.ID {
 				return fmt.Errorf("%w: %s/%s was prepared as %s but resolves to %s", botsfwstore.ErrIdentityConflict, identity.PlatformID, identity.BotUserID, prepared.ID, platformAppUserID)
 			}
-			linked.AppUser, getErr = s.appUsers.AppUser(ctx, tx, identity.BotID, platformAppUserID)
+			if resolvedAppUser, getErr = s.appUsers.AppUser(ctx, tx, identity.BotID, platformAppUserID); getErr != nil {
+				return getErr
+			}
 		}
-		if getErr != nil {
+		if getErr = botsfwstore.RequireAppUserID(resolvedAppUser.ID); getErr != nil {
 			return getErr
 		}
-		if getErr = botsfwstore.RequireAppUserID(linked.AppUser.ID); getErr != nil {
-			return getErr
+		if platformAppUserID != "" && resolvedAppUser.ID != platformAppUserID {
+			return fmt.Errorf("%w: %s/%s resolves to app user %s but the application store loaded %s", botsfwstore.ErrIdentityConflict, identity.PlatformID, identity.BotUserID, platformAppUserID, resolvedAppUser.ID)
 		}
-		if platformAppUserID != "" && linked.AppUser.ID != platformAppUserID {
-			return fmt.Errorf("%w: %s/%s resolves to app user %s but the application store loaded %s", botsfwstore.ErrIdentityConflict, identity.PlatformID, identity.BotUserID, platformAppUserID, linked.AppUser.ID)
-		}
-		if preparedAppUser && linked.AppUser.ID != prepared.ID {
-			return fmt.Errorf("%w: prepared app user %s but persisted %s", botsfwstore.ErrIdentityConflict, prepared.ID, linked.AppUser.ID)
+		if preparedAppUser && resolvedAppUser.ID != prepared.ID {
+			return fmt.Errorf("%w: prepared app user %s but persisted %s", botsfwstore.ErrIdentityConflict, prepared.ID, resolvedAppUser.ID)
 		}
 
-		if !platformUserExists {
-			platformData, getErr = request.NewPlatformUserData(linked.AppUser.ID)
+		// Compute the final platform-user payload now (pure in-memory work:
+		// factories and field setters, no dal/tx calls) so its
+		// IsAccessGranted value is available for the chat-data factory
+		// below exactly as before; only the actual write is deferred.
+		isNewPlatformUser := !platformUserExists
+		if isNewPlatformUser {
+			platformData, getErr = request.NewPlatformUserData(resolvedAppUser.ID)
 			if getErr != nil {
 				return getErr
 			}
@@ -372,25 +397,65 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 			// parameter and never uses it). EnsureBotID is the seam that
 			// finally sets it, using the identity already in scope here.
 			platformData.BaseData().EnsureBotID(identity.BotID)
+		} else if platformAppUserID == "" {
+			platformData.SetAppUserID(resolvedAppUser.ID)
+			// EnsureTimestamps (not SetUpdatedTime) so a legacy record
+			// that somehow lacks DtCreated self-heals instead of staying
+			// permanently invalid.
+			platformData.BaseData().EnsureTimestamps(s.now())
+			// Same self-heal reasoning for BotIDs: a platform-user record
+			// that predates this field, or was seeded by an application
+			// flow that never set it, gains the current bot id here
+			// instead of staying permanently invalid. Never clobbers a
+			// different bot's id already recorded.
+			platformData.BaseData().EnsureBotID(identity.BotID)
+		}
+
+		var chatData botsfwmodels.BotChatData
+		var chatKey *dalrecord.Key
+		chatExists := false
+		if identity.ChatID != "" {
+			chatData, getErr = request.NewChatData(resolvedAppUser.ID, platformData.IsAccessGranted())
+			if getErr != nil {
+				return getErr
+			}
+			if chatData == nil {
+				return errors.New("chat-data factory returned nil")
+			}
+			chatKey = NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID)
+			_, getErr = dal.GetRecordWithIDIntoData(ctx, tx, chatKey, identity.ChatID, chatData)
+			if dalrecord.IsNotFound(getErr) {
+				chatExists = false
+			} else if getErr != nil {
+				return getErr
+			} else {
+				chatExists = true
+			}
+		}
+
+		// ---- Write phase ----
+
+		if platformAppUserID == "" {
+			if linked.AppUser, getErr = s.appUsers.EnsureAppUser(ctx, tx, identity, prepared); getErr != nil {
+				return getErr
+			}
+			if getErr = botsfwstore.RequireAppUserID(linked.AppUser.ID); getErr != nil {
+				return getErr
+			}
+			if linked.AppUser.ID != prepared.ID {
+				return fmt.Errorf("%w: prepared app user %s but persisted %s", botsfwstore.ErrIdentityConflict, prepared.ID, linked.AppUser.ID)
+			}
+		} else {
+			linked.AppUser = resolvedAppUser
+		}
+
+		if isNewPlatformUser {
 			if _, getErr = dal.InsertRecordWithDataAndID(ctx, tx, platformUserKey, identity.BotUserID, platformData); getErr != nil {
 				return getErr
 			}
-		} else {
-			if platformAppUserID == "" {
-				platformData.SetAppUserID(linked.AppUser.ID)
-				// EnsureTimestamps (not SetUpdatedTime) so a legacy record
-				// that somehow lacks DtCreated self-heals instead of staying
-				// permanently invalid.
-				platformData.BaseData().EnsureTimestamps(s.now())
-				// Same self-heal reasoning for BotIDs: a platform-user record
-				// that predates this field, or was seeded by an application
-				// flow that never set it, gains the current bot id here
-				// instead of staying permanently invalid. Never clobbers a
-				// different bot's id already recorded.
-				platformData.BaseData().EnsureBotID(identity.BotID)
-				if getErr = tx.Set(ctx, dalrecord.NewRecordWithData(platformUserKey, platformData)); getErr != nil {
-					return getErr
-				}
+		} else if platformAppUserID == "" {
+			if getErr = tx.Set(ctx, dalrecord.NewRecordWithData(platformUserKey, platformData)); getErr != nil {
+				return getErr
 			}
 		}
 		linked.PlatformUser = botsfwstore.PlatformUser{ID: identity.BotUserID, Data: platformData}
@@ -398,16 +463,7 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 		if identity.ChatID == "" {
 			return nil
 		}
-		chatData, getErr := request.NewChatData(linked.AppUser.ID, platformData.IsAccessGranted())
-		if getErr != nil {
-			return getErr
-		}
-		if chatData == nil {
-			return errors.New("chat-data factory returned nil")
-		}
-		chatKey := NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID)
-		_, getErr = dal.GetRecordWithIDIntoData(ctx, tx, chatKey, identity.ChatID, chatData)
-		if dalrecord.IsNotFound(getErr) {
+		if !chatExists {
 			// Same reasoning as the new-platform-user branch above: the
 			// factory (SetBotChatFields) only sets ids and access, never
 			// timestamps.
@@ -415,8 +471,6 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 			if _, getErr = dal.InsertRecordWithDataAndID(ctx, tx, chatKey, identity.ChatID, chatData); getErr != nil {
 				return getErr
 			}
-		} else if getErr != nil {
-			return getErr
 		} else if chatData.GetAppUserID() == "" {
 			chatData.SetAppUserID(linked.AppUser.ID)
 			chatData.Base().EnsureTimestamps(s.now())
