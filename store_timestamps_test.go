@@ -68,7 +68,7 @@ func newValidChatFactory(botUserID string) func(appUserID string, accessGranted 
 func TestEnsureLinked_StampsTimestampsForNewRecords(t *testing.T) {
 	appUsers := &testAppUsers{}
 	clock := newStepClock(time.Date(2026, 7, 25, 9, 0, 0, 0, time.UTC))
-	store := NewStateStore(dalgo2memory.NewDB(), appUsers, WithClock(clock.now))
+	store := NewStateStore(dalgo2memory.New(dalgo2memory.FirestoreProfile()), appUsers, WithClock(clock.now))
 	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1", ChatID: "chat-1"}
 	request := botsfwstore.LinkRequest{
 		Identity: identity,
@@ -114,7 +114,7 @@ func TestEnsureLinked_StampsTimestampsForNewRecords(t *testing.T) {
 // bot-chat branch previously did not stamp DtUpdated at all - it only set
 // AppUserID - which is a second, related gap this closes.
 func TestEnsureLinked_RelinkPreservesDtCreatedAndAdvancesDtUpdated(t *testing.T) {
-	db := dalgo2memory.NewDB()
+	db := dalgo2memory.New(dalgo2memory.FirestoreProfile())
 	appUsers := &testAppUsers{}
 	seededAt := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	relinkAt := time.Date(2026, 7, 25, 9, 0, 0, 0, time.UTC)
@@ -184,7 +184,7 @@ func TestEnsureLinked_RelinkPreservesDtCreatedAndAdvancesDtUpdated(t *testing.T)
 // keep working unchanged.
 func TestStateStore_WithClock_DefaultsToWallClock(t *testing.T) {
 	appUsers := &testAppUsers{}
-	store := NewStateStore(dalgo2memory.NewDB(), appUsers) // no WithClock
+	store := NewStateStore(dalgo2memory.New(dalgo2memory.FirestoreProfile()), appUsers) // no WithClock
 	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1"}
 	before := time.Now().UTC()
 	linked, err := store.EnsureLinked(context.Background(), botsfwstore.LinkRequest{

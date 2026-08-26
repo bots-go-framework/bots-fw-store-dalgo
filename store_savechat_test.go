@@ -22,7 +22,7 @@ import (
 func TestSaveChat_StampsTimestamps(t *testing.T) {
 	appUsers := &testAppUsers{}
 	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.UTC)
-	store := NewStateStore(dalgo2memory.NewDB(), appUsers, WithClock(func() time.Time { return now }))
+	store := NewStateStore(dalgo2memory.New(dalgo2memory.FirestoreProfile()), appUsers, WithClock(func() time.Time { return now }))
 	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1", ChatID: "chat-1"}
 
 	chat := &botsfwmodels.ChatBaseData{BotUserIDs: []string{identity.BotUserID}} // zero DtCreated/DtUpdated
@@ -47,7 +47,7 @@ func TestSaveChat_PreservesDtCreatedAndAdvancesDtUpdated(t *testing.T) {
 	appUsers := &testAppUsers{}
 	createdAt := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	savedAt := time.Date(2026, 7, 25, 9, 0, 0, 0, time.UTC)
-	store := NewStateStore(dalgo2memory.NewDB(), appUsers, WithClock(func() time.Time { return savedAt }))
+	store := NewStateStore(dalgo2memory.New(dalgo2memory.FirestoreProfile()), appUsers, WithClock(func() time.Time { return savedAt }))
 	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1", ChatID: "chat-1"}
 
 	chat := &botsfwmodels.ChatBaseData{

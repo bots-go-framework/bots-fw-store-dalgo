@@ -38,7 +38,7 @@ func newRealisticPlatformUserFactory() func(appUserID string) (botsfwmodels.Plat
 func TestEnsureLinked_StampsBotIDForNewPlatformUser(t *testing.T) {
 	appUsers := &testAppUsers{}
 	clock := newStepClock(time.Date(2026, 7, 25, 9, 0, 0, 0, time.UTC))
-	store := NewStateStore(dalgo2memory.NewDB(), appUsers, WithClock(clock.now))
+	store := NewStateStore(dalgo2memory.New(dalgo2memory.FirestoreProfile()), appUsers, WithClock(clock.now))
 	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1"}
 	request := botsfwstore.LinkRequest{
 		Identity: identity,
@@ -67,7 +67,7 @@ func TestEnsureLinked_StampsBotIDForNewPlatformUser(t *testing.T) {
 // shared by a different bot, being linked to an application user for the
 // first time by a second bot.
 func TestEnsureLinked_RelinkStampsBotIDWithoutClobbering(t *testing.T) {
-	db := dalgo2memory.NewDB()
+	db := dalgo2memory.New(dalgo2memory.FirestoreProfile())
 	appUsers := &testAppUsers{}
 	seededAt := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	relinkAt := time.Date(2026, 7, 25, 9, 0, 0, 0, time.UTC)
@@ -120,7 +120,7 @@ func TestEnsureLinked_RelinkStampsBotIDWithoutClobbering(t *testing.T) {
 // through CreatePlatformUserRecord would fail instead of seeding, since a
 // record with empty BotIDs is invalid by construction.
 func TestSetPlatformUserAccessGranted_StampsBotID(t *testing.T) {
-	db := dalgo2memory.NewDB()
+	db := dalgo2memory.New(dalgo2memory.FirestoreProfile())
 	appUsers := &testAppUsers{}
 	seededAt := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1"}
@@ -166,7 +166,7 @@ func TestSetPlatformUserAccessGranted_StampsBotID(t *testing.T) {
 func TestEnsureLinked_NewUserFirstStart_EndToEnd(t *testing.T) {
 	appUsers := &testAppUsers{}
 	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.UTC)
-	store := NewStateStore(dalgo2memory.NewDB(), appUsers, WithClock(func() time.Time { return now }))
+	store := NewStateStore(dalgo2memory.New(dalgo2memory.FirestoreProfile()), appUsers, WithClock(func() time.Time { return now }))
 	identity := botsfwstore.Identity{
 		PlatformID: "telegram",
 		BotID:      "bot-1",

@@ -17,7 +17,7 @@ import (
 
 func TestWebhookUpdateInbox_ClaimCompleteAndLeaseExpiry(t *testing.T) {
 	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
-	db := dalgo2memory.NewDB()
+	db := dalgo2memory.New(dalgo2memory.FirestoreProfile())
 	store := NewStateStore(db, &testAppUsers{}, WithClock(func() time.Time { return now }))
 	key := botsfwstore.WebhookUpdateKey{PlatformID: "telegram", BotID: "bot", UpdateID: "42"}
 	claim, err := store.ClaimWebhookUpdate(context.Background(), key, now.Add(time.Minute))
@@ -66,7 +66,7 @@ func TestWebhookUpdateInbox_ClaimCompleteAndLeaseExpiry(t *testing.T) {
 
 func TestWebhookUpdateInbox_ConcurrentClaimHasOneOwner(t *testing.T) {
 	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
-	store := NewStateStore(dalgo2memory.NewDB(), &testAppUsers{}, WithClock(func() time.Time { return now }))
+	store := NewStateStore(dalgo2memory.New(dalgo2memory.FirestoreProfile()), &testAppUsers{}, WithClock(func() time.Time { return now }))
 	key := botsfwstore.WebhookUpdateKey{PlatformID: "telegram", BotID: "bot", UpdateID: "concurrent"}
 	const callers = 12
 	claims := make(chan botsfwstore.WebhookUpdateClaim, callers)
@@ -188,7 +188,7 @@ func (s *testAppUsers) AppUser(_ context.Context, _ dal.ReadSession, _ string, i
 
 func TestEnsureLinked_PreservesHistoricalKeys(t *testing.T) {
 	appUsers := &testAppUsers{}
-	store := NewStateStore(dalgo2memory.NewDB(), appUsers)
+	store := NewStateStore(dalgo2memory.New(dalgo2memory.FirestoreProfile()), appUsers)
 	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1", ChatID: "chat-1"}
 	request := botsfwstore.LinkRequest{
 		Identity: identity,
@@ -248,7 +248,7 @@ func TestEnsureLinked_PreservesHistoricalKeys(t *testing.T) {
 }
 
 func TestEnsureLinked_UsesAdapterTransactionForApplicationUser(t *testing.T) {
-	db := &trackingDB{DB: dalgo2memory.NewDB()}
+	db := &trackingDB{DB: dalgo2memory.New(dalgo2memory.FirestoreProfile())}
 	appUsers := &transactionalAppUsers{}
 	store := NewStateStore(db, appUsers)
 	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1", ChatID: "chat-1"}
