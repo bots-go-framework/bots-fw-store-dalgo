@@ -163,12 +163,10 @@ func NewWebhookUpdateKey(key botsfwstore.WebhookUpdateKey) *dalrecord.Key {
 	return dalrecord.NewKeyWithParentAndID(NewBotKey(key.PlatformID, key.BotID), webhookUpdatesCollection, hex.EncodeToString(digest[:]))
 }
 
-func newLeaseID() (string, error) {
+func newLeaseID() string {
 	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func (s *StateStore) ClaimWebhookUpdate(ctx context.Context, key botsfwstore.WebhookUpdateKey, leaseUntil time.Time) (claim botsfwstore.WebhookUpdateClaim, err error) {
@@ -197,12 +195,9 @@ func (s *StateStore) ClaimWebhookUpdate(ctx context.Context, key botsfwstore.Web
 			claim = botsfwstore.WebhookUpdateClaim{Status: botsfwstore.WebhookUpdateClaimLeased, Attempts: data.Attempts}
 			return nil
 		}
-		leaseID, e := newLeaseID()
-		if e != nil {
-			return e
-		}
+		leaseID := newLeaseID()
 		data.Status, data.LeaseID, data.LeaseUntil, data.Attempts, data.FailureCode = "processing", leaseID, leaseUntil, data.Attempts+1, ""
-		if e = tx.Set(ctx, dalrecord.NewRecordWithData(NewWebhookUpdateKey(key), data)); e != nil {
+		if e := tx.Set(ctx, dalrecord.NewRecordWithData(NewWebhookUpdateKey(key), data)); e != nil {
 			return e
 		}
 		claim = botsfwstore.WebhookUpdateClaim{Status: botsfwstore.WebhookUpdateClaimAcquired, LeaseID: leaseID, Attempts: data.Attempts}
@@ -368,9 +363,6 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 		}
 		if platformAppUserID != "" && resolvedAppUser.ID != platformAppUserID {
 			return fmt.Errorf("%w: %s/%s resolves to app user %s but the application store loaded %s", botsfwstore.ErrIdentityConflict, identity.PlatformID, identity.BotUserID, platformAppUserID, resolvedAppUser.ID)
-		}
-		if preparedAppUser && resolvedAppUser.ID != prepared.ID {
-			return fmt.Errorf("%w: prepared app user %s but persisted %s", botsfwstore.ErrIdentityConflict, prepared.ID, resolvedAppUser.ID)
 		}
 
 		// Compute the final platform-user payload now (pure in-memory work:
