@@ -25,12 +25,12 @@ func assertPanic(t *testing.T, f func()) {
 
 type faultyDB struct {
 	dal.DB
-	failGet                       bool
-	failTxGet                     bool
-	failSet                       bool
-	failChatGet                   bool
-	failPlatformUserSet           bool
-	failChatSet                   bool
+	failGet                        bool
+	failTxGet                      bool
+	failSet                        bool
+	failChatGet                    bool
+	failPlatformUserSet            bool
+	failChatSet                    bool
 	simulateConcurrentPlatformUser bool
 }
 
@@ -788,4 +788,3 @@ func TestEnsureLinked_RemainingGaps(t *testing.T) {
 		t.Fatal("expected error on chat tx.Set failure")
 	}
 }
-
