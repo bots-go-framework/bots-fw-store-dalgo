@@ -31,10 +31,8 @@ type faultyDB struct {
 	failSet                        bool
 	failChatGet                    bool
 	failPlatformUserUpdate         bool
-	failChatSet                    bool
-	failChatUpdate                 bool
 	failUpdate                     bool
-	failExists                     bool
+	failChatSet                    bool
 	simulateConcurrentPlatformUser bool
 }
 
@@ -88,17 +86,7 @@ func (t *faultyTx) Update(ctx context.Context, key *dalrecord.Key, updates []upd
 	if t.parent.failPlatformUserUpdate && key.Collection() == botUsersCollection {
 		return errors.New("injected tx.Update platform user failure")
 	}
-	if t.parent.failChatUpdate && key.Collection() == botChatsCollection {
-		return errors.New("injected tx.Update chat failure")
-	}
 	return t.ReadwriteTransaction.Update(ctx, key, updates, opts...)
-}
-
-func (t *faultyTx) Exists(ctx context.Context, key *dalrecord.Key) (bool, error) {
-	if t.parent.failExists {
-		return false, errors.New("injected tx.Exists failure")
-	}
-	return t.ReadwriteTransaction.Exists(ctx, key)
 }
 
 func (t *faultyTx) Insert(ctx context.Context, rec dalrecord.Record, opts ...dal.InsertOption) error {
@@ -794,7 +782,7 @@ func TestEnsureLinked_RemainingGaps(t *testing.T) {
 		t.Fatal("expected error on platformUser tx.Update failure")
 	}
 
-	// 6. tx.Update on chatKey fails when chatData.GetAppUserID() == ""
+	// 6. store.go:470: tx.Set on chatKey fails when chatData.GetAppUserID() == ""
 	memDB6 := dalgo2memory.New(dalgo2memory.FirestoreProfile())
 	_ = memDB6.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		chatKey := NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID)
@@ -803,9 +791,9 @@ func TestEnsureLinked_RemainingGaps(t *testing.T) {
 			BotUserIDs:  []string{identity.BotUserID},
 		}))
 	})
-	fDB6 := &faultyDB{DB: memDB6, failChatUpdate: true}
+	fDB6 := &faultyDB{DB: memDB6, failChatSet: true}
 	store6 := NewStateStore(fDB6, &testAppUsers{}, WithClock(func() time.Time { return now }))
 	if _, err := store6.EnsureLinked(ctx, baseReq()); err == nil {
-		t.Fatal("expected error on chat tx.Update failure")
+		t.Fatal("expected error on chat tx.Set failure")
 	}
 }

@@ -17,16 +17,20 @@ framework itself never sees a DALgo connection or transaction.
 
 ## Partial updates
 
-Several services can share these collections with different Go types for the
-same document. To keep them from wiping each other's fields, an operation on an
-existing document writes only the fields it owns, with DALgo field updates:
+A platform-user document (`botPlatforms/{platform}/botUsers/{user}`) is shared
+by every bot of a platform, and different services may model it with different
+Go types. To keep them from wiping each other's fields, an operation on an
+existing platform user writes only the fields it owns, with DALgo field updates
+that only set values:
 
 | Operation | Fields written |
 |---|---|
 | `EnsureLinked`, linking an existing platform user | `appUserID`, `botIDs`, `dtUpdated` (and `dtCreated` only when it was missing) |
-| `EnsureLinked`, linking an existing chat | `appUserID`, `dtUpdated` (and `dtCreated` only when it was missing) |
 | `SetPlatformUserAccessGranted` | `isAccessGranted`, `botIDs`, `dtUpdated` (and `dtCreated` only when it was missing) |
-| `SaveChat` on an existing chat | every field the supplied chat type models (an empty `omitempty` field is deleted) |
 
-`Set` / `Insert` is used only for the first insert of a document. Fields that
+`Set` / `Insert` is used only for a platform user's first insert. Fields that
 the supplied Go type does not model are never touched.
+
+Chat documents live under their bot
+(`botPlatforms/{platform}/bots/{bot}/botChats/{chat}`), so two bots never share
+one; they are still written whole with `Set`.

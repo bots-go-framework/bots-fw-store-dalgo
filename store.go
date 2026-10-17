@@ -473,12 +473,12 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 				return getErr
 			}
 		} else if chatData.GetAppUserID() == "" {
-			chatCreatedWasZero := chatData.Base().DtCreated.IsZero()
 			chatData.SetAppUserID(linked.AppUser.ID)
 			chatData.Base().EnsureTimestamps(s.now())
-			// Link only: appUserID and the timestamps. Fields the caller's
-			// chat type does not model stay untouched.
-			if getErr = tx.Update(ctx, chatKey, appUserLinkUpdates(linked.AppUser.ID, &chatData.Base().BotBaseData, chatCreatedWasZero)); getErr != nil {
+			// Chat documents are kept per bot (see NewBotChatKey), so no other
+			// service writes this document and it is rewritten whole, which
+			// also lets fields the NewChatData factory fills self-heal.
+			if getErr = tx.Set(ctx, dalrecord.NewRecordWithData(chatKey, chatData)); getErr != nil {
 				return getErr
 			}
 		} else if chatData.GetAppUserID() != linked.AppUser.ID {
@@ -557,10 +557,6 @@ func (s *StateStore) AppUser(ctx context.Context, botID, appUserID string) (resu
 	return result, err
 }
 
-// chatFieldUpdates is a seam so a test can reach SaveChat's error path; the
-// production value is modelledFieldUpdates.
-var chatFieldUpdates = modelledFieldUpdates
-
 func (s *StateStore) SaveChat(ctx context.Context, identity botsfwstore.Identity, data botsfwmodels.BotChatData) error {
 	if err := identity.Validate(); err != nil {
 		return err
@@ -580,24 +576,10 @@ func (s *StateStore) SaveChat(ctx context.Context, identity botsfwstore.Identity
 		// again) zero - a legacy record, or simply one it built itself - would
 		// write a record BotChatData.Validate would reject, with no self-heal
 		// seam to fix it. EnsureTimestamps closes that gap the same way.
-		key := NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID)
-		exists, err := tx.Exists(ctx, key)
-		if err != nil {
-			return err
-		}
 		data.Base().EnsureTimestamps(s.now())
-		if !exists {
-			// First insert: there is no stored document to preserve.
-			return tx.Set(ctx, dalrecord.NewRecordWithData(key, data))
-		}
-		// An existing document may hold fields this caller's type does not
-		// model (written by another service), so update only the fields the
-		// type models instead of replacing the document.
-		updates, err := chatFieldUpdates(data)
-		if err != nil {
-			return err
-		}
-		return tx.Update(ctx, key, updates)
+		// Chat documents are kept per bot (see NewBotChatKey), so no other
+		// service writes this document and it is rewritten whole.
+		return tx.Set(ctx, dalrecord.NewRecordWithData(NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID), data))
 	})
 }
 

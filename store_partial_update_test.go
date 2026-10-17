@@ -2,7 +2,6 @@ package botsfwstoredalgo
 
 import (
 	"context"
-	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -86,7 +85,6 @@ func newLinkRequest(identity botsfwstore.Identity) botsfwstore.LinkRequest {
 			return &botsfwmodels.PlatformUserBaseDbo{}
 		},
 		NewPlatformUserData: newValidPlatformUserFactory(identity.BotID),
-		NewChatData:         newValidChatFactory(identity.BotUserID),
 	}
 }
 
@@ -108,21 +106,11 @@ func rawPlatformUser(extra map[string]any) map[string]any {
 	return doc
 }
 
-func TestEnsureLinked_LinkingKeepsFieldsTheProfileDoesNotModel(t *testing.T) {
+func TestEnsureLinked_LinkingKeepsPlatformUserFieldsTheProfileDoesNotModel(t *testing.T) {
 	db := dalgo2memory.New(dalgo2memory.FirestoreProfile())
-	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1", ChatID: "chat-1"}
+	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1"}
 	userKey := NewPlatformUserKey(identity.PlatformID, identity.BotUserID)
-	chatKey := NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID)
 	seedRaw(t, db, userKey, rawPlatformUser(nil))
-	seedRaw(t, db, chatKey, map[string]any{
-		"appUserID":       "",
-		"dtCreated":       seededAt,
-		"dtUpdated":       seededAt,
-		"isAccessGranted": true,
-		"botUserIDs":      []string{"user-1"},
-		"foreignString":   "kept",
-		"foreignMap":      map[string]any{"a": float64(1)},
-	})
 	store := NewStateStore(db, &testAppUsers{}, WithClock(func() time.Time { return changeAt }))
 
 	linked, err := store.EnsureLinked(context.Background(), newLinkRequest(identity))
@@ -139,32 +127,17 @@ func TestEnsureLinked_LinkingKeepsFieldsTheProfileDoesNotModel(t *testing.T) {
 	assertRawTime(t, user, "dtCreated", seededAt)
 	assertRawTime(t, user, "dtUpdated", changeAt)
 
-	chat := readRaw(t, db, chatKey)
-	assertForeignFieldsSurvive(t, chat)
-	assertRawField(t, chat, "isAccessGranted", true)
-	assertRawField(t, chat, "botUserIDs", []any{"user-1"})
-	assertRawField(t, chat, "appUserID", linked.AppUser.ID)
-	assertRawTime(t, chat, "dtCreated", seededAt)
-	assertRawTime(t, chat, "dtUpdated", changeAt)
 }
 
-func TestEnsureLinked_LinkingHealsLegacyRecordAndKeepsUnmodelledFields(t *testing.T) {
+func TestEnsureLinked_LinkingHealsLegacyPlatformUserAndKeepsUnmodelledFields(t *testing.T) {
 	db := dalgo2memory.New(dalgo2memory.FirestoreProfile())
-	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1", ChatID: "chat-1"}
+	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1"}
 	userKey := NewPlatformUserKey(identity.PlatformID, identity.BotUserID)
-	chatKey := NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID)
-	// Legacy records: no dtCreated, no botIDs / botUserIDs set by this profile.
+	// Legacy record: no dtCreated, no botIDs.
 	user := rawPlatformUser(nil)
 	delete(user, "dtCreated")
 	delete(user, "botIDs")
 	seedRaw(t, db, userKey, user)
-	seedRaw(t, db, chatKey, map[string]any{
-		"appUserID":     "",
-		"dtUpdated":     seededAt,
-		"botUserIDs":    []string{"user-1"},
-		"foreignString": "kept",
-		"foreignMap":    map[string]any{"a": float64(1)},
-	})
 	store := NewStateStore(db, &testAppUsers{}, WithClock(func() time.Time { return changeAt }))
 
 	if _, err := store.EnsureLinked(context.Background(), newLinkRequest(identity)); err != nil {
@@ -175,9 +148,6 @@ func TestEnsureLinked_LinkingHealsLegacyRecordAndKeepsUnmodelledFields(t *testin
 	assertForeignFieldsSurvive(t, userDoc)
 	assertRawTime(t, userDoc, "dtCreated", changeAt)
 	assertRawField(t, userDoc, "botIDs", []any{"bot-1"})
-	chatDoc := readRaw(t, db, chatKey)
-	assertForeignFieldsSurvive(t, chatDoc)
-	assertRawTime(t, chatDoc, "dtCreated", changeAt)
 }
 
 func TestSetPlatformUserAccessGranted_KeepsFieldsTheProfileDoesNotModel(t *testing.T) {
@@ -207,117 +177,8 @@ func TestSetPlatformUserAccessGranted_KeepsFieldsTheProfileDoesNotModel(t *testi
 	assertRawTime(t, got, "dtUpdated", changeAt)
 }
 
-// noteChat is one service's profile of a chat document: the framework base
-// plus its own fields. JSON tags equal the Firestore names so the in-memory
-// test database, which stores JSON, sees the same field names Firestore does.
-type noteChat struct {
-	botsfwmodels.ChatBaseData
-	Note  string `json:"note,omitempty" firestore:"note,omitempty"`
-	Count int    `json:"count" firestore:"count"`
-}
-
-func TestSaveChat_KeepsFieldsTheProfileDoesNotModel(t *testing.T) {
-	db := dalgo2memory.New(dalgo2memory.FirestoreProfile())
-	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1", ChatID: "chat-1"}
-	chatKey := NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID)
-	store := NewStateStore(db, &testAppUsers{}, WithClock(func() time.Time { return changeAt }))
-	ctx := context.Background()
-
-	// First save inserts the whole document.
-	chat := &noteChat{
-		ChatBaseData: botsfwmodels.ChatBaseData{
-			BotBaseData: botsfwmodels.BotBaseData{DtCreated: seededAt, DtUpdated: seededAt, AppUserID: "app-1"},
-			BotUserIDs:  []string{"user-1"},
-		},
-		Note:  "first",
-		Count: 1,
-	}
-	if err := store.SaveChat(ctx, identity, chat); err != nil {
-		t.Fatalf("first SaveChat() error: %v", err)
-	}
-	first := readRaw(t, db, chatKey)
-	assertRawField(t, first, "note", "first")
-	assertRawField(t, first, "count", float64(1))
-
-	// Another service's profile adds fields this type does not model.
-	err := db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
-		return tx.Update(ctx, chatKey, []update.Update{
-			update.ByFieldName("foreignString", "kept"),
-			update.ByFieldName("foreignMap", map[string]any{"a": float64(1)}),
-		})
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Second save: change one field, clear the omitempty one.
-	chat.Count = 2
-	chat.Note = ""
-	if err := store.SaveChat(ctx, identity, chat); err != nil {
-		t.Fatalf("second SaveChat() error: %v", err)
-	}
-	got := readRaw(t, db, chatKey)
-	assertForeignFieldsSurvive(t, got)
-	assertRawField(t, got, "count", float64(2))
-	if _, has := got["note"]; has {
-		t.Errorf("cleared omitempty field %q is still stored: %v", "note", got["note"])
-	}
-	assertRawField(t, got, "appUserID", "app-1")
-	assertRawTime(t, got, "dtCreated", seededAt)
-	assertRawTime(t, got, "dtUpdated", changeAt)
-}
-
-func TestSaveChat_ErrorBranches(t *testing.T) {
-	ctx := context.Background()
-	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1", ChatID: "chat-1"}
-	chatKey := NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID)
-	newChat := func() *botsfwmodels.ChatBaseData {
-		return &botsfwmodels.ChatBaseData{
-			BotBaseData: botsfwmodels.BotBaseData{DtCreated: seededAt, DtUpdated: seededAt},
-			BotUserIDs:  []string{"user-1"},
-		}
-	}
-	seeded := func() *faultyDB {
-		db := dalgo2memory.New(dalgo2memory.FirestoreProfile())
-		seedRaw(t, db, chatKey, map[string]any{"botUserIDs": []string{"user-1"}})
-		return &faultyDB{DB: db}
-	}
-
-	t.Run("exists fails", func(t *testing.T) {
-		fDB := seeded()
-		fDB.failExists = true
-		err := NewStateStore(fDB, &testAppUsers{}).SaveChat(ctx, identity, newChat())
-		if err == nil || !strings.Contains(err.Error(), "tx.Exists") {
-			t.Fatalf("SaveChat() error = %v, want the tx.Exists failure", err)
-		}
-	})
-	t.Run("first insert fails", func(t *testing.T) {
-		fDB := &faultyDB{DB: dalgo2memory.New(dalgo2memory.FirestoreProfile()), failChatSet: true}
-		err := NewStateStore(fDB, &testAppUsers{}).SaveChat(ctx, identity, newChat())
-		if err == nil || !strings.Contains(err.Error(), "tx.Set chat") {
-			t.Fatalf("SaveChat() error = %v, want the tx.Set failure", err)
-		}
-	})
-	t.Run("update fails", func(t *testing.T) {
-		fDB := seeded()
-		fDB.failChatUpdate = true
-		err := NewStateStore(fDB, &testAppUsers{}).SaveChat(ctx, identity, newChat())
-		if err == nil || !strings.Contains(err.Error(), "tx.Update chat") {
-			t.Fatalf("SaveChat() error = %v, want the tx.Update failure", err)
-		}
-	})
-	t.Run("field enumeration fails", func(t *testing.T) {
-		defer func(orig func(any) ([]update.Update, error)) { chatFieldUpdates = orig }(chatFieldUpdates)
-		chatFieldUpdates = func(any) ([]update.Update, error) { return nil, errors.New("enumeration failed") }
-		err := NewStateStore(seeded(), &testAppUsers{}).SaveChat(ctx, identity, newChat())
-		if err == nil || err.Error() != "enumeration failed" {
-			t.Fatalf("SaveChat() error = %v, want the enumeration failure", err)
-		}
-	})
-}
-
 // TestFieldNameConstantsMatchModelTags pins the hand-written field names to
-// the Firestore tags of the framework models they address.
+// the Firestore and JSON tags of the framework models they address.
 func TestFieldNameConstantsMatchModelTags(t *testing.T) {
 	tagName := func(typ reflect.Type, goName string) string {
 		f, ok := typ.FieldByName(goName)
@@ -325,6 +186,10 @@ func TestFieldNameConstantsMatchModelTags(t *testing.T) {
 			t.Fatalf("%v has no field %s", typ, goName)
 		}
 		name, _, _ := strings.Cut(f.Tag.Get("firestore"), ",")
+		// dalgo2memory stores JSON, so the json name must agree too.
+		if jsonName, _, _ := strings.Cut(f.Tag.Get("json"), ","); jsonName != name {
+			t.Errorf("%v.%s json name %q differs from firestore name %q", typ, goName, jsonName, name)
+		}
 		return name
 	}
 	base := reflect.TypeOf(botsfwmodels.BotBaseData{})
@@ -340,5 +205,116 @@ func TestFieldNameConstantsMatchModelTags(t *testing.T) {
 	}
 	if got := tagName(reflect.TypeOf(botsfwmodels.WithBotIDs{}), "BotIDs"); got != fieldBotIDs {
 		t.Errorf("WithBotIDs.BotIDs firestore name = %q, constant = %q", got, fieldBotIDs)
+	}
+}
+
+func rawKeysAreUnique(t *testing.T, doc map[string]any) {
+	t.Helper()
+	seen := map[string]string{}
+	for k := range doc {
+		if other, dup := seen[strings.ToLower(k)]; dup {
+			t.Errorf("document holds keys %q and %q that differ only in case: %v", other, k, doc)
+		}
+		seen[strings.ToLower(k)] = k
+	}
+}
+
+// TestPlatformUserUpdates_OnPlainFrameworkTypeInMemoryDB runs the unmodified
+// framework platform-user type (no extra json tags) through the field-update
+// paths on dalgo2memory, which stores JSON, and checks the values read back as
+// a typed record, that the stored keys are not duplicated in another case, and
+// that a field the type does not model survives.
+func TestPlatformUserUpdates_OnPlainFrameworkTypeInMemoryDB(t *testing.T) {
+	ctx := context.Background()
+	db := dalgo2memory.New(dalgo2memory.FirestoreProfile())
+	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1"}
+	userKey := NewPlatformUserKey(identity.PlatformID, identity.BotUserID)
+	err := db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+		if err := CreatePlatformUserRecord(ctx, tx, identity.PlatformID, identity.BotUserID, &botsfwmodels.PlatformUserBaseDbo{
+			BotBaseData:        botsfwmodels.BotBaseData{DtCreated: seededAt, DtUpdated: seededAt},
+			WithRequiredBotIDs: botsfwmodels.WithRequiredBotIDs{BotIDs: []string{"other-bot"}},
+			FirstName:          "Ann",
+			LastName:           "Lee",
+			UserName:           "annlee",
+		}); err != nil {
+			return err
+		}
+		return tx.Update(ctx, userKey, []update.Update{update.ByFieldName("foreignString", "kept")})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStateStore(db, &testAppUsers{}, WithClock(func() time.Time { return changeAt }))
+	readTyped := func() *botsfwmodels.PlatformUserBaseDbo {
+		data := &botsfwmodels.PlatformUserBaseDbo{}
+		if _, err := GetPlatformUser(ctx, db, identity.PlatformID, identity.BotUserID, data); err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+
+	linked, err := store.EnsureLinked(ctx, newLinkRequest(identity))
+	if err != nil {
+		t.Fatalf("EnsureLinked() error: %v", err)
+	}
+	got := readTyped()
+	if got.AppUserID != linked.AppUser.ID || got.AppUserID == "" {
+		t.Errorf("AppUserID = %q, want %q", got.AppUserID, linked.AppUser.ID)
+	}
+	if !reflect.DeepEqual(got.BotIDs, []string{"other-bot", "bot-1"}) {
+		t.Errorf("BotIDs = %v, want the existing id plus this bot", got.BotIDs)
+	}
+	if !got.DtCreated.Equal(seededAt) || !got.DtUpdated.Equal(changeAt) {
+		t.Errorf("DtCreated/DtUpdated = %v/%v, want %v/%v", got.DtCreated, got.DtUpdated, seededAt, changeAt)
+	}
+	if got.FirstName != "Ann" || got.LastName != "Lee" || got.UserName != "annlee" {
+		t.Errorf("modelled names changed: %+v", got)
+	}
+	raw := readRaw(t, db, userKey)
+	rawKeysAreUnique(t, raw)
+	assertRawField(t, raw, "foreignString", "kept")
+
+	for _, grant := range []bool{true, false} {
+		result, err := store.SetPlatformUserAccessGranted(ctx, identity, func() botsfwmodels.PlatformUserData {
+			return &botsfwmodels.PlatformUserBaseDbo{}
+		}, grant)
+		if err != nil || result.Data.IsAccessGranted() != grant {
+			t.Fatalf("SetPlatformUserAccessGranted(%v) = %#v, %v", grant, result, err)
+		}
+		got = readTyped()
+		if got.AccessGranted != grant || got.AppUserID != linked.AppUser.ID || got.FirstName != "Ann" {
+			t.Errorf("after access=%v, read back %+v", grant, got)
+		}
+		raw = readRaw(t, db, userKey)
+		rawKeysAreUnique(t, raw)
+		assertRawField(t, raw, "foreignString", "kept")
+	}
+}
+
+// TestSaveChat_ClearedFieldsAreClearedOnInMemoryDB guards the chat path, which
+// still replaces the whole document: a framework chat type has no json tags, so
+// a field-by-firestore-name delete would miss the stored key on dalgo2memory
+// and a cleared wizard state would read back.
+func TestSaveChat_ClearedFieldsAreClearedOnInMemoryDB(t *testing.T) {
+	ctx := context.Background()
+	db := dalgo2memory.New(dalgo2memory.FirestoreProfile())
+	identity := botsfwstore.Identity{PlatformID: "telegram", BotID: "bot-1", BotUserID: "user-1", ChatID: "chat-1"}
+	store := NewStateStore(db, &testAppUsers{}, WithClock(func() time.Time { return changeAt }))
+	chat := &botsfwmodels.ChatBaseData{BotUserIDs: []string{"user-1"}, Title: "T"}
+	chat.SetAwaitingReplyTo("x")
+	if err := store.SaveChat(ctx, identity, chat); err != nil {
+		t.Fatal(err)
+	}
+	chat.SetAwaitingReplyTo("")
+	chat.Title = ""
+	if err := store.SaveChat(ctx, identity, chat); err != nil {
+		t.Fatal(err)
+	}
+	got := &botsfwmodels.ChatBaseData{}
+	if _, err := dal.GetRecordWithIDIntoData(ctx, db, NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID), identity.ChatID, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.GetAwaitingReplyTo() != "" || got.Title != "" {
+		t.Errorf("cleared fields read back as awaitingReplyTo=%q title=%q", got.GetAwaitingReplyTo(), got.Title)
 	}
 }
