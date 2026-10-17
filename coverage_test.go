@@ -11,6 +11,7 @@ import (
 	"github.com/dal-go/dalgo/adapters/dalgo2memory"
 	"github.com/dal-go/dalgo/dal"
 	dalrecord "github.com/dal-go/record"
+	"github.com/dal-go/record/update"
 )
 
 func assertPanic(t *testing.T, f func()) {
@@ -25,12 +26,13 @@ func assertPanic(t *testing.T, f func()) {
 
 type faultyDB struct {
 	dal.DB
-	failGet                       bool
-	failTxGet                     bool
-	failSet                       bool
-	failChatGet                   bool
-	failPlatformUserSet           bool
-	failChatSet                   bool
+	failGet                        bool
+	failTxGet                      bool
+	failSet                        bool
+	failChatGet                    bool
+	failPlatformUserUpdate         bool
+	failUpdate                     bool
+	failChatSet                    bool
 	simulateConcurrentPlatformUser bool
 }
 
@@ -71,13 +73,20 @@ func (t *faultyTx) Set(ctx context.Context, rec dalrecord.Record) error {
 	if t.parent.failSet {
 		return errors.New("injected tx.Set failure")
 	}
-	if t.parent.failPlatformUserSet && rec.Key().Collection() == botUsersCollection {
-		return errors.New("injected tx.Set platform user failure")
-	}
 	if t.parent.failChatSet && rec.Key().Collection() == botChatsCollection {
 		return errors.New("injected tx.Set chat failure")
 	}
 	return t.ReadwriteTransaction.Set(ctx, rec)
+}
+
+func (t *faultyTx) Update(ctx context.Context, key *dalrecord.Key, updates []update.Update, opts ...dal.Precondition) error {
+	if t.parent.failUpdate {
+		return errors.New("injected tx.Update failure")
+	}
+	if t.parent.failPlatformUserUpdate && key.Collection() == botUsersCollection {
+		return errors.New("injected tx.Update platform user failure")
+	}
+	return t.ReadwriteTransaction.Update(ctx, key, updates, opts...)
 }
 
 func (t *faultyTx) Insert(ctx context.Context, rec dalrecord.Record, opts ...dal.InsertOption) error {
@@ -370,12 +379,12 @@ func TestSetPlatformUserAccessGranted_Methods(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Fail on Set
-	fDB.failSet = true
+	// Fail on Update
+	fDB.failUpdate = true
 	if _, err := store.SetPlatformUserAccessGranted(ctx, identity, func() botsfwmodels.PlatformUserData { return &botsfwmodels.PlatformUserBaseDbo{} }, true); err == nil {
-		t.Fatal("expected error on tx.Set failure")
+		t.Fatal("expected error on tx.Update failure")
 	}
-	fDB.failSet = false
+	fDB.failUpdate = false
 
 	// Happy path
 	pu, err := store.SetPlatformUserAccessGranted(ctx, identity, func() botsfwmodels.PlatformUserData { return &botsfwmodels.PlatformUserBaseDbo{} }, true)
@@ -759,7 +768,7 @@ func TestEnsureLinked_RemainingGaps(t *testing.T) {
 		t.Fatal("expected error on chatKey tx.Get failure")
 	}
 
-	// 5. store.go:450: tx.Set on platformUserKey fails when platformAppUserID == ""
+	// 5. tx.Update on platformUserKey fails when platformAppUserID == ""
 	memDB5 := dalgo2memory.New(dalgo2memory.FirestoreProfile())
 	_ = memDB5.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		return CreatePlatformUserRecord(ctx, tx, identity.PlatformID, identity.BotUserID, &botsfwmodels.PlatformUserBaseDbo{
@@ -767,10 +776,10 @@ func TestEnsureLinked_RemainingGaps(t *testing.T) {
 			WithRequiredBotIDs: botsfwmodels.WithRequiredBotIDs{BotIDs: []string{identity.BotID}},
 		})
 	})
-	fDB5 := &faultyDB{DB: memDB5, failPlatformUserSet: true}
+	fDB5 := &faultyDB{DB: memDB5, failPlatformUserUpdate: true}
 	store5 := NewStateStore(fDB5, &testAppUsers{}, WithClock(func() time.Time { return now }))
 	if _, err := store5.EnsureLinked(ctx, baseReq()); err == nil {
-		t.Fatal("expected error on platformUser tx.Set failure")
+		t.Fatal("expected error on platformUser tx.Update failure")
 	}
 
 	// 6. store.go:470: tx.Set on chatKey fails when chatData.GetAppUserID() == ""
@@ -788,4 +797,3 @@ func TestEnsureLinked_RemainingGaps(t *testing.T) {
 		t.Fatal("expected error on chat tx.Set failure")
 	}
 }
-
