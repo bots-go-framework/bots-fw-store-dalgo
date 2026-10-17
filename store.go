@@ -17,6 +17,7 @@ import (
 	"github.com/bots-go-framework/bots-fw-store/botsfwstore"
 	"github.com/dal-go/dalgo/dal"
 	dalrecord "github.com/dal-go/record"
+	"github.com/dal-go/record/update"
 )
 
 const (
@@ -370,6 +371,7 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 		// IsAccessGranted value is available for the chat-data factory
 		// below exactly as before; only the actual write is deferred.
 		isNewPlatformUser := !platformUserExists
+		platformCreatedWasZero := false
 		if isNewPlatformUser {
 			platformData, getErr = request.NewPlatformUserData(resolvedAppUser.ID)
 			if getErr != nil {
@@ -390,6 +392,7 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 			// finally sets it, using the identity already in scope here.
 			platformData.BaseData().EnsureBotID(identity.BotID)
 		} else if platformAppUserID == "" {
+			platformCreatedWasZero = platformData.BaseData().DtCreated.IsZero()
 			platformData.SetAppUserID(resolvedAppUser.ID)
 			// EnsureTimestamps (not SetUpdatedTime) so a legacy record
 			// that somehow lacks DtCreated self-heals instead of staying
@@ -446,7 +449,13 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 				return getErr
 			}
 		} else if platformAppUserID == "" {
-			if getErr = tx.Set(ctx, dalrecord.NewRecordWithData(platformUserKey, platformData)); getErr != nil {
+			// Link only: appUserID, botIDs and the timestamps. Fields the
+			// caller's platform-user type does not model stay untouched.
+			updates := append(
+				appUserLinkUpdates(resolvedAppUser.ID, &platformData.BaseData().BotBaseData, platformCreatedWasZero),
+				update.ByFieldName(fieldBotIDs, platformData.BaseData().BotIDs),
+			)
+			if getErr = tx.Update(ctx, platformUserKey, updates); getErr != nil {
 				return getErr
 			}
 		}
@@ -464,9 +473,12 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 				return getErr
 			}
 		} else if chatData.GetAppUserID() == "" {
+			chatCreatedWasZero := chatData.Base().DtCreated.IsZero()
 			chatData.SetAppUserID(linked.AppUser.ID)
 			chatData.Base().EnsureTimestamps(s.now())
-			if getErr = tx.Set(ctx, dalrecord.NewRecordWithData(chatKey, chatData)); getErr != nil {
+			// Link only: appUserID and the timestamps. Fields the caller's
+			// chat type does not model stay untouched.
+			if getErr = tx.Update(ctx, chatKey, appUserLinkUpdates(linked.AppUser.ID, &chatData.Base().BotBaseData, chatCreatedWasZero)); getErr != nil {
 				return getErr
 			}
 		} else if chatData.GetAppUserID() != linked.AppUser.ID {
@@ -545,6 +557,10 @@ func (s *StateStore) AppUser(ctx context.Context, botID, appUserID string) (resu
 	return result, err
 }
 
+// chatFieldUpdates is a seam so a test can reach SaveChat's error path; the
+// production value is modelledFieldUpdates.
+var chatFieldUpdates = modelledFieldUpdates
+
 func (s *StateStore) SaveChat(ctx context.Context, identity botsfwstore.Identity, data botsfwmodels.BotChatData) error {
 	if err := identity.Validate(); err != nil {
 		return err
@@ -564,8 +580,24 @@ func (s *StateStore) SaveChat(ctx context.Context, identity botsfwstore.Identity
 		// again) zero - a legacy record, or simply one it built itself - would
 		// write a record BotChatData.Validate would reject, with no self-heal
 		// seam to fix it. EnsureTimestamps closes that gap the same way.
+		key := NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID)
+		exists, err := tx.Exists(ctx, key)
+		if err != nil {
+			return err
+		}
 		data.Base().EnsureTimestamps(s.now())
-		return tx.Set(ctx, dalrecord.NewRecordWithData(NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID), data))
+		if !exists {
+			// First insert: there is no stored document to preserve.
+			return tx.Set(ctx, dalrecord.NewRecordWithData(key, data))
+		}
+		// An existing document may hold fields this caller's type does not
+		// model (written by another service), so update only the fields the
+		// type models instead of replacing the document.
+		updates, err := chatFieldUpdates(data)
+		if err != nil {
+			return err
+		}
+		return tx.Update(ctx, key, updates)
 	})
 }
 
@@ -590,12 +622,20 @@ func (s *StateStore) SetPlatformUserAccessGranted(ctx context.Context, identity 
 			return notFound(err)
 		}
 		data.SetAccessGranted(value)
+		createdWasZero := data.BaseData().DtCreated.IsZero()
 		data.BaseData().EnsureTimestamps(s.now())
-		// Same self-heal seam as EnsureLinked: this loads and rewrites an
+		// Same self-heal seam as EnsureLinked: this loads and updates an
 		// existing platform-user record too, so a legacy record missing
 		// BotIDs gets the same chance to repair itself here.
 		data.BaseData().EnsureBotID(identity.BotID)
-		if err := tx.Set(ctx, dalrecord.NewRecordWithData(key, data)); err != nil {
+		// Update only the fields this operation owns; fields the caller's
+		// platform-user type does not model stay untouched.
+		updates := append(
+			timestampUpdates(&data.BaseData().BotBaseData, createdWasZero),
+			update.ByFieldName(fieldAccessGranted, data.IsAccessGranted()),
+			update.ByFieldName(fieldBotIDs, data.BaseData().BotIDs),
+		)
+		if err := tx.Update(ctx, key, updates); err != nil {
 			return err
 		}
 		result = botsfwstore.PlatformUser{ID: identity.BotUserID, Data: data}
