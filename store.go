@@ -1,7 +1,7 @@
 // Package botsfwstoredalgo is the DALgo implementation of botsfwstore.StateStore.
 //
-// It deliberately retains the historical botPlatforms/bots/botUsers/botChats
-// key layout, so moving to this adapter requires no data migration.
+// Hosts configure per-instance keys; the historical layout remains the default
+// for unrelated deployments. A configured store never reads another layout.
 package botsfwstoredalgo
 
 import (
@@ -70,6 +70,7 @@ type StateStore struct {
 	getDB    DBProvider
 	appUsers AppUserStore
 	now      func() time.Time
+	keys     Keys
 }
 
 var _ botsfwstore.StateStore = (*StateStore)(nil)
@@ -111,6 +112,7 @@ func NewStateStoreWithProvider(getDB DBProvider, appUsers AppUserStore, opts ...
 		getDB:    getDB,
 		appUsers: appUsers,
 		now:      func() time.Time { return time.Now().UTC() },
+		keys:     DefaultKeys(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -118,41 +120,41 @@ func NewStateStoreWithProvider(getDB DBProvider, appUsers AppUserStore, opts ...
 	return s
 }
 
-// NewPlatformKey creates the historical top-level platform key.
-func NewPlatformKey[PlatformID ~string](platformID PlatformID) *dalrecord.Key {
+// Platform creates a platform key in this configured layout.
+func (k Keys) Platform(platformID string) *dalrecord.Key {
 	if platformID == "" {
 		panic("platform ID is required")
 	}
-	return dalrecord.NewKeyWithID(botPlatformsCollection, string(platformID))
+	return dalrecord.NewKeyWithParentAndID(cloneKey(k.parent), k.platforms, platformID)
 }
 
-// NewBotKey creates the historical platform bot key.
-func NewBotKey[PlatformID ~string](platformID PlatformID, botID string) *dalrecord.Key {
+// Bot creates a bot key in this configured layout.
+func (k Keys) Bot(platformID, botID string) *dalrecord.Key {
 	if botID == "" {
 		panic("bot ID is required")
 	}
-	return dalrecord.NewKeyWithParentAndID(NewPlatformKey(platformID), botsCollection, botID)
+	return dalrecord.NewKeyWithParentAndID(k.Platform(platformID), botsCollection, botID)
 }
 
-// NewPlatformUserKey creates the historical platform-user key.
-func NewPlatformUserKey[PlatformID ~string](platformID PlatformID, userID string) *dalrecord.Key {
+// PlatformUser creates a platform-user key in this configured layout.
+func (k Keys) PlatformUser(platformID, userID string) *dalrecord.Key {
 	if userID == "" {
 		panic("platform-user ID is required")
 	}
-	return dalrecord.NewKeyWithParentAndID(NewPlatformKey(platformID), botUsersCollection, userID)
+	return dalrecord.NewKeyWithParentAndID(k.Platform(platformID), botUsersCollection, userID)
 }
 
-// NewBotChatKey creates the historical bot-chat key.
-func NewBotChatKey[PlatformID ~string](platformID PlatformID, botID, chatID string) *dalrecord.Key {
+// BotChat creates a chat key in this configured layout.
+func (k Keys) BotChat(platformID, botID, chatID string) *dalrecord.Key {
 	if chatID == "" {
 		panic("chat ID is required")
 	}
-	return dalrecord.NewKeyWithParentAndID(NewBotKey(platformID, botID), botChatsCollection, chatID)
+	return dalrecord.NewKeyWithParentAndID(k.Bot(platformID, botID), botChatsCollection, chatID)
 }
 
-// NewWebhookUpdateKey stores the inbox under its bot to isolate equal provider
+// WebhookUpdate stores the inbox under its bot to isolate equal provider
 // update IDs from different Telegram bots.
-func NewWebhookUpdateKey(key botsfwstore.WebhookUpdateKey) *dalrecord.Key {
+func (k Keys) WebhookUpdate(key botsfwstore.WebhookUpdateKey) *dalrecord.Key {
 	if err := key.Validate(); err != nil {
 		panic(err)
 	}
@@ -161,7 +163,23 @@ func NewWebhookUpdateKey(key botsfwstore.WebhookUpdateKey) *dalrecord.Key {
 	// SHA-256 makes a bounded opaque, deterministic key while preserving exact
 	// deduplication semantics.
 	digest := sha256.Sum256([]byte(key.UpdateID))
-	return dalrecord.NewKeyWithParentAndID(NewBotKey(key.PlatformID, key.BotID), webhookUpdatesCollection, hex.EncodeToString(digest[:]))
+	return dalrecord.NewKeyWithParentAndID(k.Bot(key.PlatformID, key.BotID), webhookUpdatesCollection, hex.EncodeToString(digest[:]))
+}
+
+func NewPlatformKey[P ~string](platformID P) *dalrecord.Key {
+	return DefaultKeys().Platform(string(platformID))
+}
+func NewBotKey[P ~string](platformID P, botID string) *dalrecord.Key {
+	return DefaultKeys().Bot(string(platformID), botID)
+}
+func NewPlatformUserKey[P ~string](platformID P, userID string) *dalrecord.Key {
+	return DefaultKeys().PlatformUser(string(platformID), userID)
+}
+func NewBotChatKey[P ~string](platformID P, botID, chatID string) *dalrecord.Key {
+	return DefaultKeys().BotChat(string(platformID), botID, chatID)
+}
+func NewWebhookUpdateKey(key botsfwstore.WebhookUpdateKey) *dalrecord.Key {
+	return DefaultKeys().WebhookUpdate(key)
 }
 
 func newLeaseID() string {
@@ -183,7 +201,7 @@ func (s *StateStore) ClaimWebhookUpdate(ctx context.Context, key botsfwstore.Web
 	}
 	err = db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		data := &webhookUpdateData{}
-		_, getErr := dal.GetRecordWithIDIntoData(ctx, tx, NewWebhookUpdateKey(key), key.UpdateID, data)
+		_, getErr := dal.GetRecordWithIDIntoData(ctx, tx, s.keys.WebhookUpdate(key), key.UpdateID, data)
 		if getErr != nil && !dalrecord.IsNotFound(getErr) {
 			return getErr
 		}
@@ -198,7 +216,7 @@ func (s *StateStore) ClaimWebhookUpdate(ctx context.Context, key botsfwstore.Web
 		}
 		leaseID := newLeaseID()
 		data.Status, data.LeaseID, data.LeaseUntil, data.Attempts, data.FailureCode = "processing", leaseID, leaseUntil, data.Attempts+1, ""
-		if e := tx.Set(ctx, dalrecord.NewRecordWithData(NewWebhookUpdateKey(key), data)); e != nil {
+		if e := tx.Set(ctx, dalrecord.NewRecordWithData(s.keys.WebhookUpdate(key), data)); e != nil {
 			return e
 		}
 		claim = botsfwstore.WebhookUpdateClaim{Status: botsfwstore.WebhookUpdateClaimAcquired, LeaseID: leaseID, Attempts: data.Attempts}
@@ -226,7 +244,7 @@ func (s *StateStore) finishWebhookUpdate(ctx context.Context, key botsfwstore.We
 	}
 	return db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		data := &webhookUpdateData{}
-		k := NewWebhookUpdateKey(key)
+		k := s.keys.WebhookUpdate(key)
 		if _, e := dal.GetRecordWithIDIntoData(ctx, tx, k, key.UpdateID, data); e != nil {
 			return e
 		}
@@ -246,7 +264,11 @@ func (s *StateStore) finishWebhookUpdate(ctx context.Context, key botsfwstore.We
 
 // GetPlatformUser loads a platform user from the historical schema.
 func GetPlatformUser(ctx context.Context, reader dal.ReadSession, platformID, userID string, data botsfwmodels.PlatformUserData) (PlatformUserRecord, error) {
-	result, err := dal.GetRecordWithIDIntoData(ctx, reader, NewPlatformUserKey(platformID, userID), userID, data)
+	return DefaultKeys().GetPlatformUser(ctx, reader, platformID, userID, data)
+}
+
+func (k Keys) GetPlatformUser(ctx context.Context, reader dal.ReadSession, platformID, userID string, data botsfwmodels.PlatformUserData) (PlatformUserRecord, error) {
+	result, err := dal.GetRecordWithIDIntoData(ctx, reader, k.PlatformUser(platformID, userID), userID, data)
 	return PlatformUserRecord(result), err
 }
 
@@ -289,7 +311,7 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 	}
 
 	identity := request.Identity
-	platformData, found, err := readPlatformUser(ctx, db, identity, request.ReadPlatformUserData)
+	platformData, found, err := s.readPlatformUser(ctx, db, identity, request.ReadPlatformUserData)
 	if err != nil {
 		return linked, err
 	}
@@ -323,7 +345,7 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 		if platformData == nil {
 			return errors.New("platform-user reader factory returned nil")
 		}
-		platformUserKey := NewPlatformUserKey(identity.PlatformID, identity.BotUserID)
+		platformUserKey := s.keys.PlatformUser(identity.PlatformID, identity.BotUserID)
 		_, getErr := dal.GetRecordWithIDIntoData(ctx, tx, platformUserKey, identity.BotUserID, platformData)
 		platformUserExists := true
 		if dalrecord.IsNotFound(getErr) {
@@ -417,7 +439,7 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 			if chatData == nil {
 				return errors.New("chat-data factory returned nil")
 			}
-			chatKey = NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID)
+			chatKey = s.keys.BotChat(identity.PlatformID, identity.BotID, identity.ChatID)
 			_, getErr = dal.GetRecordWithIDIntoData(ctx, tx, chatKey, identity.ChatID, chatData)
 			if dalrecord.IsNotFound(getErr) {
 				chatExists = false
@@ -490,7 +512,7 @@ func (s *StateStore) EnsureLinked(ctx context.Context, request botsfwstore.LinkR
 	return linked, notFound(err)
 }
 
-func readPlatformUser(
+func (s *StateStore) readPlatformUser(
 	ctx context.Context,
 	db dal.DB,
 	identity botsfwstore.Identity,
@@ -501,7 +523,7 @@ func readPlatformUser(
 		if data == nil {
 			return errors.New("platform-user reader factory returned nil")
 		}
-		_, getErr := dal.GetRecordWithIDIntoData(ctx, tx, NewPlatformUserKey(identity.PlatformID, identity.BotUserID), identity.BotUserID, data)
+		_, getErr := dal.GetRecordWithIDIntoData(ctx, tx, s.keys.PlatformUser(identity.PlatformID, identity.BotUserID), identity.BotUserID, data)
 		if dalrecord.IsNotFound(getErr) {
 			data = nil
 			return nil
@@ -531,7 +553,7 @@ func (s *StateStore) PlatformUser(ctx context.Context, identity botsfwstore.Iden
 		if data == nil {
 			return errors.New("platform-user reader factory returned nil")
 		}
-		_, err := dal.GetRecordWithIDIntoData(ctx, tx, NewPlatformUserKey(identity.PlatformID, identity.BotUserID), identity.BotUserID, data)
+		_, err := dal.GetRecordWithIDIntoData(ctx, tx, s.keys.PlatformUser(identity.PlatformID, identity.BotUserID), identity.BotUserID, data)
 		if err == nil {
 			result = botsfwstore.PlatformUser{ID: identity.BotUserID, Data: data}
 		}
@@ -579,7 +601,7 @@ func (s *StateStore) SaveChat(ctx context.Context, identity botsfwstore.Identity
 		data.Base().EnsureTimestamps(s.now())
 		// Chat documents are kept per bot (see NewBotChatKey), so no other
 		// service writes this document and it is rewritten whole.
-		return tx.Set(ctx, dalrecord.NewRecordWithData(NewBotChatKey(identity.PlatformID, identity.BotID, identity.ChatID), data))
+		return tx.Set(ctx, dalrecord.NewRecordWithData(s.keys.BotChat(identity.PlatformID, identity.BotID, identity.ChatID), data))
 	})
 }
 
@@ -599,7 +621,7 @@ func (s *StateStore) SetPlatformUserAccessGranted(ctx context.Context, identity 
 		if data == nil {
 			return errors.New("platform-user reader factory returned nil")
 		}
-		key := NewPlatformUserKey(identity.PlatformID, identity.BotUserID)
+		key := s.keys.PlatformUser(identity.PlatformID, identity.BotUserID)
 		if _, err := dal.GetRecordWithIDIntoData(ctx, tx, key, identity.BotUserID, data); err != nil {
 			return notFound(err)
 		}
