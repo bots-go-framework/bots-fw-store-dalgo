@@ -6,7 +6,7 @@ toolchain go1.27.4
 
 require (
 	github.com/bots-go-framework/bots-fw-store v0.14.2
-	github.com/dal-go/dalgo v0.102.5
+	github.com/dal-go/dalgo v0.102.6
 	github.com/dal-go/record v0.1.5
 )
 
